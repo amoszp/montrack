@@ -1,1 +1,33 @@
-self.addEventListener('install',e=>{e.waitUntil(caches.open('montrack-v1').then(c=>c.addAll(['/','/manifest.webmanifest','/icon.svg'])));self.skipWaiting()});self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).catch(()=>caches.match('/'))))});
+const CACHE_NAME='montrack-v2';
+
+self.addEventListener('install',event=>{
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('montrack-') && key !== CACHE_NAME).map(key => caches.delete(key))))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate',event=>{
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(keys.filter(key => !['montrack-v2'].includes(key)).map(key => caches.delete(key))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch',event=>{
+  if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
+
+  event.respondWith(
+    fetch(event.request)
+      .then(response => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+        return response;
+      })
+      .catch(() => caches.match(event.request).then(response => response || caches.match('/index.html')))
+  );
+});
+

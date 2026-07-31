@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { registerSW } from 'virtual:pwa-register';
 import { jsPDF } from 'jspdf';
 import { addDays, addMonths, eachDayOfInterval, endOfMonth, endOfWeek, format, isSameDay, isSameMonth, isWithinInterval, startOfMonth, startOfWeek, subMonths } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -729,5 +730,14 @@ const getImported = (value: any): Data => {
   return getData();
 };
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+registerSW({
+  immediate: true,
+  onOfflineReady() {
+    console.info('Montrack is ready for offline use.');
+  },
+  onNeedRefresh() {
+    console.info('Montrack has a new version available.');
+  },
+});
+
 createRoot(document.getElementById('root')!).render(<App />);
