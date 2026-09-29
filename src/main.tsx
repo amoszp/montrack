@@ -5,7 +5,7 @@ import { addDays, addMonths, eachDayOfInterval, endOfMonth, endOfWeek, format, i
 import { es } from 'date-fns/locale';
 import {
   AlertTriangle, Bell, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Download, Eye, FileDown, History,
-  Info, Minus, Mountain, Pencil, Plus, Settings, Share2, Trash2, Upload, Users, X,
+  Info, Minus, Pencil, Plus, Settings, Share2, Trash2, Upload, Users, X,
 } from 'lucide-react';
 import {
   createId, loadData, nextWorkerColor, saveData, shiftIcons, storageLimitBytes, storageUsage, toCurrentData,
@@ -250,9 +250,7 @@ function App() {
 
   return (
     <main className="app">
-      <header>
-        <div className="brand"><span aria-hidden="true"><Mountain /></span><h1 className="visually-hidden">Montrack</h1></div>
-      </header>
+      <h1 className="visually-hidden">Montrack</h1>
       {tab === 'calendar' && (
         <Calendar
           data={data}
