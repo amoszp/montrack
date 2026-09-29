@@ -9,11 +9,11 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       injectRegister: 'auto',
-      includeAssets: ['icon.svg', 'manifest.webmanifest'],
       manifest: {
         name: 'Montrack',
         short_name: 'Montrack',
-        description: 'Montrack attendance tracking and reporting app.',
+        description: 'Montrack: registro sencillo de turnos y pagos de trabajadores.',
+        lang: 'es',
         start_url: '/',
         scope: '/',
         display: 'standalone',
@@ -42,6 +42,16 @@ export default defineConfig({
             options: {
               cacheName: 'html-cache',
               networkTimeoutSeconds: 3,
+            },
+          },
+          {
+            // Keep the DM Sans font available offline once it has been loaded.
+            urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'google-fonts',
+              expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
             },
           },
         ],

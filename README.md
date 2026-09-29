@@ -10,11 +10,12 @@ It has been designed with a **mobile-first** approach, prioritizing speed, simpl
 
 - 📅 Monthly and weekly calendar views
 - 👥 Unlimited worker management
-- ⏱️ Assign worked hours to one or multiple days at once
-- 🔄 Individual default hours for each worker
+- 🌗 Configurable shifts (Mañana, Tarde, Noche… or your own) with fixed payment per shift
+- ⏱️ Assign one or several shifts to a worker on one or multiple days at once
+- 🔄 Default hours per shift
 - ✏️ Edit any assignment at any time
 - 📊 Worker statistics and work history
-- 📄 Export reports (PDF, Excel)
+- 📄 Export reports (PDF, Excel, TXT), with preview and sharing
 - 💾 Backup and restore data (JSON)
 - 📱 Installable as a PWA on Android, iPhone and Desktop
 - 🌐 Fully offline
@@ -51,8 +52,9 @@ Open the **Trabajadores** section and create all the workers you want to manage.
 Each worker stores:
 
 - Name
-- Default working hours
 - Automatically assigned color
+
+A worker has no fixed shift: the shift is chosen every time they are assigned to a day.
 
 ---
 
@@ -62,13 +64,17 @@ The Calendar is the main screen of the application.
 
 Simply:
 
-1. Tap a worker.
-2. Enter the worked hours.
-3. Optionally save those hours as the new default.
-4. Select one or multiple dates.
-5. Confirm.
+1. Tap a day (or tap a worker to pick several days).
+2. Select the worker.
+3. Tick one or more shifts (for example Mañana + Noche).
+4. Adjust the hours if needed (optionally save them as the shift default).
+5. Press **Guardar turnos**.
 
-The worker is assigned to every selected day.
+The selected shifts are assigned on every selected day. The same shift cannot be added twice to the same worker on the same day.
+
+## Shifts and payments
+
+Shifts are configured in **Ajustes → Configuración de turnos** (name, usual hours, payment). Payment is fixed per shift and does not depend on the hours worked. Every assignment stores a snapshot of the shift name and payment, so changing a shift later never changes past records.
 
 ---
 
@@ -78,11 +84,13 @@ Tap any calendar day.
 
 A modal window opens showing:
 
-- Assigned workers
-- Worked hours
+- Assigned workers and each of their shifts
+- Hours and payment of every shift
 - Edit options
-- Delete options
+- Delete a single shift (with confirmation)
 - Add worker button
+
+When a worker's last shift of the day is deleted, they disappear from that day.
 
 Everything in the application is editable.
 
@@ -145,9 +153,13 @@ Includes:
 - Totals
 - Filters
 
+### TXT
+
+A simple, human-readable report per worker.
+
 ### JSON
 
-Creates a complete backup of the application.
+Creates a complete backup of the application (workers, shifts, assignments and their payment snapshots).
 
 This file can later be imported to restore every worker and assignment exactly as they were.
 
@@ -205,10 +217,7 @@ The application intentionally avoids excessive colors and visual clutter, allowi
 - React
 - TypeScript
 - Vite
-- Tailwind CSS
-- React Router
-- React Hook Form
-- Zod
+- jsPDF
 - date-fns
 - LocalStorage
 - Progressive Web App (PWA)
@@ -227,6 +236,19 @@ The architecture has been designed to allow future features such as:
 - Additional worker information
 
 without requiring a major refactor.
+
+---
+
+# 🧪 Development
+
+```bash
+npm install
+npm run dev      # development server
+npm test         # business-logic tests (migration, payments, exports)
+npm run build    # production build with PWA service worker
+```
+
+Data saved by older versions (workers with a fixed day/night type) is migrated automatically on first launch; an untouched copy of the old data is kept in LocalStorage under `montrack-data-v1-backup`.
 
 ---
 
