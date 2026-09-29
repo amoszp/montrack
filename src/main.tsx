@@ -58,8 +58,22 @@ const writeFlag = (name: string, value: string) => {
   try {
     localStorage.setItem(name, value);
   } catch {
-    // Only a convenience flag; losing it just shows the reminder again.
+    // Only a convenience flag; losing it just falls back to the default.
   }
+};
+
+// Text size is a per-device preference: only text scales, buttons keep their large touch size.
+const textSizeKey = 'montrack-text-size';
+const textSizes = [
+  { id: 'normal', label: 'Normal', scale: 1 },
+  { id: 'medium', label: 'Mediano', scale: 0.9 },
+  { id: 'small', label: 'Pequeño', scale: 0.8 },
+] as const;
+type TextSize = (typeof textSizes)[number]['id'];
+const readTextSize = (): TextSize => textSizes.find((size) => size.id === readFlag(textSizeKey))?.id ?? 'normal';
+const applyTextSize = (id: TextSize) => {
+  const size = textSizes.find((entry) => entry.id === id) ?? textSizes[0];
+  document.documentElement.style.setProperty('--text-scale', String(size.scale));
 };
 
 function App() {
@@ -80,6 +94,7 @@ function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [reminderDone, setReminderDone] = useState(() => readFlag(reminderKey));
   const [reminderLater, setReminderLater] = useState(false);
+  const [textSize, setTextSize] = useState<TextSize>(readTextSize);
   const saveFailed = useRef(false);
 
   useEffect(() => {
@@ -289,6 +304,13 @@ function App() {
           onOpenExport={(kind) => setExportRequest({ format: kind })}
           onImport={importBackup}
           onInvalidFile={() => notify('No se pudo leer el archivo.', 'error')}
+          textSize={textSize}
+          onTextSize={(id) => {
+            setTextSize(id);
+            applyTextSize(id);
+            writeFlag(textSizeKey, id);
+            notify(`Tamaño del texto: ${textSizes.find((size) => size.id === id)?.label}`);
+          }}
         />
       )}
       <nav aria-label="Secciones">
@@ -991,8 +1013,9 @@ function HistoryModal({ data, worker, assignments, period, close }: { data: Data
 // ---------------------------------------------------------------------------
 // Settings, export and preview
 
-function SettingsView({ data, onEditShift, onAddShift, onOpenExport, onImport, onInvalidFile }: {
-  data: Data; onEditShift: (shift: Shift) => void; onAddShift: () => void; onOpenExport: (kind: ExportFormat) => void; onImport: (value: unknown) => void; onInvalidFile: () => void;
+function SettingsView({ data, onEditShift, onAddShift, onOpenExport, onImport, onInvalidFile, textSize, onTextSize }: {
+  data: Data; onEditShift: (shift: Shift) => void; onAddShift: () => void; onOpenExport: (kind: ExportFormat) => void; onImport: (value: unknown) => void;
+  onInvalidFile: () => void; textSize: TextSize; onTextSize: (id: TextSize) => void;
 }) {
   const importRef = useRef<HTMLInputElement>(null);
   const used = storageUsage(data);
@@ -1016,6 +1039,17 @@ function SettingsView({ data, onEditShift, onAddShift, onOpenExport, onImport, o
 
   return (
     <section className="view settings">
+      <h3>Tamaño del texto</h3>
+      <div className="segmented text-size" role="group" aria-label="Tamaño del texto">
+        {textSizes.map((size) => (
+          <button key={size.id} className={textSize === size.id ? 'selected' : ''} aria-pressed={textSize === size.id} onClick={() => onTextSize(size.id)}>
+            <span aria-hidden="true" style={{ fontSize: `${size.scale * 1.25}rem` }}>Aa</span>
+            {size.label}
+          </button>
+        ))}
+      </div>
+      <p className="hint">Los botones mantienen su tamaño para que sigan siendo fáciles de tocar.</p>
+
       <h3>Configuración de turnos</h3>
       <p className="hint">El pago es fijo por turno. Los cambios solo afectan a los turnos nuevos.</p>
       <div className="shift-cards">
@@ -1187,6 +1221,12 @@ function PreviewModal({ data, format: kind, config, onClose, onRun }: { data: Da
     </Modal>
   );
 }
+
+applyTextSize(readTextSize());
+
+// Older iPhones ignore user-scalable=no and touch-action; block their pinch gesture directly.
+document.addEventListener('gesturestart', (event) => event.preventDefault());
+document.addEventListener('touchmove', (event) => { if (event.touches.length > 1) event.preventDefault(); }, { passive: false });
 
 registerSW({
   immediate: true,
