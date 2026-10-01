@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { emptyData, legacyBackupKey, loadData, migrateV1, storageKey, toCurrentData, type Data } from './model';
-import { addAssignments, duplicateShiftMessage, groupByWorker, paymentService, removeAssignment, updateAssignment } from './payment';
+import { addAssignments, duplicateShiftMessage, groupByWorker, paymentService, removeAssignment, paymentBreakdown, updateAssignment, weeklyTotals } from './payment';
 import { buildBackup, buildReport, buildReportText, createExcelBlob, createPdfBlob, filterData } from './exports';
 import { zip } from './xlsx';
 
@@ -117,9 +117,15 @@ describe('shift assignment', () => {
     expect(addAssignments(first.data, 'daniel', ['2026-09-29'], [{ shiftId: 'morning', hours: 6 }]).created).toHaveLength(1);
   });
 
-  it('saves hours as the shift default only when asked', () => {
+  it('never changes the configured shift hours when assigning', () => {
     expect(addAssignments(withWorkers(), 'maria', ['2026-09-29'], [{ shiftId: 'morning', hours: 7 }]).data.shifts[0].defaultHours).toBe(6);
-    expect(addAssignments(withWorkers(), 'maria', ['2026-09-29'], [{ shiftId: 'morning', hours: 7 }], true).data.shifts[0].defaultHours).toBe(7);
+  });
+
+  it('adds a second shift to a worker who already has one that day, keeping the first', () => {
+    const first = addAssignments(withWorkers(), 'maria', ['2026-09-29'], [{ shiftId: 'morning', hours: 6 }]);
+    const second = addAssignments(first.data, 'maria', ['2026-09-29'], [{ shiftId: 'night', hours: 12 }]);
+    expect(second.created).toHaveLength(1);
+    expect(second.data.assignments.map((item) => item.shiftNameSnapshot)).toEqual(['Mañana', 'Noche']);
   });
 
   it('does not change existing records when a shift configuration changes', () => {
@@ -128,6 +134,44 @@ describe('shift assignment', () => {
     expect(changed.assignments[0]).toMatchObject({ shiftNameSnapshot: 'Mañana', hours: 6, paymentSnapshot: 30 });
     const next = addAssignments(changed, 'maria', ['2026-09-30'], [{ shiftId: 'morning', hours: 7 }]).data;
     expect(next.assignments[1]).toMatchObject({ shiftNameSnapshot: 'Mañana larga', paymentSnapshot: 35 });
+  });
+});
+
+describe('weekly payments', () => {
+  it('adds up payment snapshots per Monday–Sunday week, clipped to the period, ignoring hours', () => {
+    let data = withWorkers();
+    data = addAssignments(data, 'maria', ['2026-09-01', '2026-09-06'], [{ shiftId: 'morning', hours: 6 }]).data;
+    data = addAssignments(data, 'maria', ['2026-09-29'], [{ shiftId: 'morning', hours: 6 }, { shiftId: 'night', hours: 12 }]).data;
+    data = addAssignments(data, 'maria', ['2026-10-01'], [{ shiftId: 'afternoon', hours: 6 }]).data;
+    const weeks = weeklyTotals(data.assignments, '2026-09-01', '2026-09-30');
+    expect(weeks.map((week) => [week.start, week.end, week.shifts, week.total])).toEqual([
+      ['2026-09-01', '2026-09-06', 2, 60],
+      ['2026-09-07', '2026-09-13', 0, 0],
+      ['2026-09-14', '2026-09-20', 0, 0],
+      ['2026-09-21', '2026-09-27', 0, 0],
+      ['2026-09-28', '2026-09-30', 2, 60],
+    ]);
+    expect(weeks.reduce((sum, week) => sum + week.total, 0)).toBe(paymentService.total(data.assignments.filter((item) => item.date <= '2026-09-30')));
+  });
+
+  it('breaks a week down by shift and saved price', () => {
+    let data = withWorkers();
+    data = addAssignments(data, 'maria', ['2026-09-28', '2026-09-29'], [{ shiftId: 'morning', hours: 6 }]).data;
+    data = addAssignments(data, 'maria', ['2026-09-29'], [{ shiftId: 'night', hours: 12 }]).data;
+    data = { ...data, shifts: data.shifts.map((shift) => (shift.id === 'morning' ? { ...shift, paymentAmount: 35 } : shift)) };
+    data = addAssignments(data, 'maria', ['2026-09-30'], [{ shiftId: 'morning', hours: 6 }]).data;
+    expect(paymentBreakdown(data.assignments)).toEqual([
+      { name: 'Mañana', unit: 30, count: 2, total: 60 },
+      { name: 'Noche', unit: 30, count: 1, total: 30 },
+      { name: 'Mañana', unit: 35, count: 1, total: 35 },
+    ]);
+  });
+
+  it('keeps the historical payment of each shift after the configuration changes', () => {
+    const { data } = addAssignments(withWorkers(), 'maria', ['2026-09-28'], [{ shiftId: 'morning', hours: 6 }]);
+    const changed = { ...data, shifts: data.shifts.map((shift) => (shift.id === 'morning' ? { ...shift, defaultHours: 7, paymentAmount: 35 } : shift)) };
+    const next = addAssignments(changed, 'maria', ['2026-09-29'], [{ shiftId: 'morning', hours: 7 }]).data;
+    expect(weeklyTotals(next.assignments, '2026-09-28', '2026-10-04')).toEqual([{ start: '2026-09-28', end: '2026-10-04', shifts: 2, total: 65 }]);
   });
 });
 

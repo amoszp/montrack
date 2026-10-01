@@ -1,4 +1,7 @@
+import { addDays, endOfWeek, format } from 'date-fns';
 import { createId, type Assignment, type Data, type Shift } from './model';
+
+const isoDay = (date: Date) => format(date, 'yyyy-MM-dd');
 
 export const duplicateShiftMessage = 'Este turno ya está asignado a este trabajador para este día.';
 
@@ -33,7 +36,7 @@ export const hasShift = (data: Data, workerId: string, date: string, shiftId: st
 export type NewShiftEntry = { shiftId: string; hours: number };
 
 /** Adds every selected shift on every selected date, skipping combinations that already exist. */
-export const addAssignments = (data: Data, workerId: string, dates: string[], entries: NewShiftEntry[], keepAsDefault = false) => {
+export const addAssignments = (data: Data, workerId: string, dates: string[], entries: NewShiftEntry[]) => {
   const assignments = [...data.assignments];
   const created: Assignment[] = [];
   let skipped = 0;
@@ -50,13 +53,7 @@ export const addAssignments = (data: Data, workerId: string, dates: string[], en
       created.push(assignment);
     });
   });
-  const shifts = keepAsDefault
-    ? data.shifts.map((shift) => {
-        const entry = entries.find((item) => item.shiftId === shift.id);
-        return entry && entry.hours > 0 ? { ...shift, defaultHours: entry.hours } : shift;
-      })
-    : data.shifts;
-  return { data: { ...data, shifts, assignments }, created, skipped };
+  return { data: { ...data, assignments }, created, skipped };
 };
 
 export type AssignmentChanges = { workerId: string; date: string; shiftId: string; hours: number };
@@ -97,6 +94,39 @@ export const groupByWorker = (data: Data, assignments: Assignment[]) => {
         .sort((a, b) => a.date.localeCompare(b.date) || order(a.shiftId) - order(b.shiftId)),
     }))
     .filter((group) => group.items.length);
+};
+
+export type WeekTotal = { start: string; end: string; shifts: number; total: number };
+
+/**
+ * Splits a period into Monday–Sunday weeks (as the calendar shows them), clipped to the period, and adds
+ * up the payment snapshots of the shifts in each one. Hours play no part in what is paid.
+ */
+export const weeklyTotals = (assignments: Assignment[], startDate: string, endDate: string): WeekTotal[] => {
+  const weeks: WeekTotal[] = [];
+  let cursor = new Date(`${startDate}T12:00:00`);
+  while (isoDay(cursor) <= endDate) {
+    const sunday = endOfWeek(cursor, { weekStartsOn: 1 });
+    const start = isoDay(cursor);
+    const end = isoDay(sunday) < endDate ? isoDay(sunday) : endDate;
+    const items = assignments.filter((item) => item.date >= start && item.date <= end);
+    weeks.push({ start, end, shifts: items.length, total: paymentService.total(items) });
+    cursor = addDays(sunday, 1);
+  }
+  return weeks;
+};
+
+export type PaymentLine = { name: string; unit: number; count: number; total: number };
+
+/** "Mañana × 3 = 90 €" lines: shifts grouped by their saved name and saved payment, in the order they were worked. */
+export const paymentBreakdown = (assignments: Assignment[]): PaymentLine[] => {
+  const lines = new Map<string, PaymentLine>();
+  [...assignments].sort((a, b) => a.date.localeCompare(b.date)).forEach((item) => {
+    const key = `${item.shiftNameSnapshot}|${item.paymentSnapshot}`;
+    const line = lines.get(key) ?? { name: item.shiftNameSnapshot, unit: item.paymentSnapshot, count: 0, total: 0 };
+    lines.set(key, { ...line, count: line.count + 1, total: Math.round((line.total + item.paymentSnapshot) * 100) / 100 });
+  });
+  return [...lines.values()];
 };
 
 export const groupByDate = (data: Data, assignments: Assignment[]) => {

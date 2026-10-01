@@ -1,18 +1,21 @@
-import { useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode, type TouchEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
-import { addDays, addMonths, eachDayOfInterval, endOfMonth, endOfWeek, format, isSameMonth, startOfMonth, startOfWeek, subMonths } from 'date-fns';
+import {
+  addDays, addMonths, addWeeks, addYears, eachDayOfInterval, endOfMonth, endOfWeek, endOfYear, format, getISOWeek, isSameMonth, startOfMonth, startOfWeek,
+  startOfYear, subMonths,
+} from 'date-fns';
 import { es } from 'date-fns/locale';
 import {
   AlertTriangle, Bell, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Download, Eye, FileDown, History,
-  Info, Minus, Pencil, Plus, Settings, Share2, Trash2, Upload, Users, X,
+  Info, Minus, Pencil, Plus, Settings, Share2, Trash2, Upload, X,
 } from 'lucide-react';
 import {
   createId, loadData, nextWorkerColor, saveData, shiftIcons, storageLimitBytes, storageUsage, toCurrentData,
   type Assignment, type Data, type Shift, type Worker,
 } from './model';
 import {
-  addAssignments, duplicateShiftMessage, formatHours, groupByDate, groupByWorker, paymentService, removeAssignment, updateAssignment,
+  addAssignments, duplicateShiftMessage, formatHours, groupByDate, paymentService, paymentBreakdown, removeAssignment, updateAssignment, weeklyTotals,
   type AssignmentChanges, type NewShiftEntry,
 } from './payment';
 import {
@@ -21,7 +24,7 @@ import {
 } from './exports';
 import './styles.css';
 
-type Tab = 'calendar' | 'history' | 'workers' | 'settings';
+type Tab = 'calendar' | 'history' | 'settings';
 type Toast = { message: string; tone: 'ok' | 'error' };
 type ConfirmState = { title: string; body: ReactNode; confirmLabel: string; onConfirm: () => void };
 type AssignFlow = { worker: Worker; dates: string[] };
@@ -34,6 +37,7 @@ const longDate = (value: string) => format(toDate(value), "EEEE, d 'de' MMMM 'de
 const minSelectableYear = 2026;
 const weekLabels = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
 const reminderKey = 'montrack-export-reminder';
+const workerKey = 'montrack-selected-worker';
 
 // Accepts both "5,5" and "5.5", since Spanish keyboards use a comma for decimals.
 const parseNumber = (value: string) => {
@@ -81,8 +85,8 @@ function App() {
   const [tab, setTab] = useState<Tab>('calendar');
   const [cursor, setCursor] = useState(new Date());
   const [weekly, setWeekly] = useState(false);
-  const [dayOpen, setDayOpen] = useState<string | null>(null);
-  const [pickerFor, setPickerFor] = useState<{ date?: string } | null>(null);
+  const [workerId, setWorkerId] = useState(() => readFlag(workerKey));
+  const [dayFor, setDayFor] = useState<{ workerId: string; date: string } | null>(null);
   const [assignFlow, setAssignFlow] = useState<AssignFlow | null>(null);
   const [editingAssignment, setEditingAssignment] = useState<Assignment | null>(null);
   const [editingWorker, setEditingWorker] = useState<Worker | null | undefined>(undefined);
@@ -121,16 +125,24 @@ function App() {
     setReminderDone(previousMonthKey);
   };
 
-  const openDay = (date: string) => {
-    if (data.assignments.some((item) => item.date === date)) setDayOpen(date);
-    else setPickerFor({ date });
+  // One worker is selected at a time and shared by Calendario and Historial (remembered on this device).
+  const calendarWorkers = activeWorkers(data);
+  const historyWorkers = data.workers.filter((worker) => !worker.archived || data.assignments.some((item) => item.workerId === worker.id));
+  const calendarWorker = calendarWorkers.find((worker) => worker.id === workerId) ?? calendarWorkers[0];
+  const historyWorker = historyWorkers.find((worker) => worker.id === workerId) ?? calendarWorker ?? historyWorkers[0];
+  const selectWorker = (worker: Worker) => {
+    setWorkerId(worker.id);
+    writeFlag(workerKey, worker.id);
   };
+  const dayWorker = dayFor ? workerOf(dayFor.workerId) : undefined;
+  const addWorker = () => setEditingWorker(null);
 
-  const saveAssignments = (workerId: string, dates: string[], entries: NewShiftEntry[], keep: boolean) => {
-    const result = addAssignments(data, workerId, dates, entries, keep);
+  const saveAssignments = (workerId: string, dates: string[], entries: NewShiftEntry[]) => {
+    const result = addAssignments(data, workerId, dates, entries);
     if (!result.created.length) return result.skipped ? duplicateShiftMessage : 'No se ha guardado ningún turno.';
     setData(result.data);
     setAssignFlow(null);
+    setDayFor(null);
     const count = result.created.length;
     notify(`${count} ${count === 1 ? 'turno guardado' : 'turnos guardados'}${result.skipped ? ` · ${result.skipped} ya estaban asignados` : ''}`);
     return undefined;
@@ -165,11 +177,17 @@ function App() {
   };
 
   const saveWorker = (name: string) => {
+    const id = editingWorker?.id ?? createId();
     setData((current) =>
       editingWorker
         ? { ...current, workers: current.workers.map((entry) => (entry.id === editingWorker.id ? { ...entry, name } : entry)) }
-        : { ...current, workers: [...current.workers, { id: createId(), name, color: nextWorkerColor(current.workers) }] },
+        : { ...current, workers: [...current.workers, { id, name, color: nextWorkerColor(current.workers) }] },
     );
+    // A newly added worker becomes the one shown in the calendar.
+    if (!editingWorker) {
+      setWorkerId(id);
+      writeFlag(workerKey, id);
+    }
     setEditingWorker(undefined);
     notify('Trabajador guardado');
   };
@@ -269,14 +287,17 @@ function App() {
       {tab === 'calendar' && (
         <Calendar
           data={data}
+          worker={calendarWorker}
+          workers={calendarWorkers}
+          onWorker={selectWorker}
           cursor={cursor}
           weekly={weekly}
           setWeekly={setWeekly}
           setCursor={setCursor}
-          openDay={openDay}
-          openAssign={(worker) => setAssignFlow({ worker, dates: [] })}
+          openDay={(worker, date) => setDayFor({ workerId: worker.id, date })}
+          openMultiDay={(worker) => setAssignFlow({ worker, dates: [] })}
           openPicker={() => setMonthPicker(true)}
-          onAddWorker={() => { setTab('workers'); setEditingWorker(null); }}
+          onAddWorker={addWorker}
           banner={showReminder && (
             <div className="banner" role="region" aria-label="Recordatorio">
               <Bell aria-hidden="true" />
@@ -294,11 +315,19 @@ function App() {
           storageWarning={storageUsage(data) > storageLimitBytes * 0.8}
         />
       )}
-      {tab === 'history' && <HistoryView data={data} />}
-      {tab === 'workers' && <Workers data={data} onEdit={setEditingWorker} onDelete={askDeleteWorker} onAdd={() => setEditingWorker(null)} />}
+      {tab === 'history' && (
+        <HistoryView
+          data={data}
+          worker={historyWorker}
+          workers={historyWorkers}
+          onWorker={selectWorker}
+          openDay={(worker, date) => setDayFor({ workerId: worker.id, date })}
+        />
+      )}
       {tab === 'settings' && (
         <SettingsView
           data={data}
+          workers={<Workers data={data} onEdit={setEditingWorker} onDelete={askDeleteWorker} onAdd={addWorker} />}
           onEditShift={setEditingShift}
           onAddShift={() => setEditingShift(null)}
           onOpenExport={(kind) => setExportRequest({ format: kind })}
@@ -314,7 +343,7 @@ function App() {
         />
       )}
       <nav aria-label="Secciones">
-        {([['calendar', CalendarDays, 'Calendario'], ['history', History, 'Historial'], ['workers', Users, 'Trabajadores'], ['settings', Settings, 'Ajustes']] as const).map(([id, Icon, label]) => (
+        {([['calendar', CalendarDays, 'Calendario'], ['history', History, 'Historial'], ['settings', Settings, 'Ajustes']] as const).map(([id, Icon, label]) => (
           <button key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>
             <Icon aria-hidden="true" />
             <span>{label}</span>
@@ -322,23 +351,16 @@ function App() {
         ))}
       </nav>
 
-      {dayOpen && (
-        <DayModal
-          date={dayOpen}
+      {dayFor && dayWorker && (
+        <WorkerDayDialog
+          key={`${dayFor.workerId}-${dayFor.date}`}
           data={data}
-          close={() => setDayOpen(null)}
+          worker={dayWorker}
+          date={dayFor.date}
+          close={() => setDayFor(null)}
+          onSave={saveAssignments}
           onEdit={setEditingAssignment}
           onDelete={askDeleteAssignment}
-          onAdd={() => setPickerFor({ date: dayOpen })}
-        />
-      )}
-      {pickerFor && (
-        <WorkerPicker
-          data={data}
-          date={pickerFor.date}
-          close={() => setPickerFor(null)}
-          onPick={(worker) => { setAssignFlow({ worker, dates: pickerFor.date ? [pickerFor.date] : [] }); setPickerFor(null); }}
-          onAddWorker={() => { setPickerFor(null); setDayOpen(null); setTab('workers'); setEditingWorker(null); }}
         />
       )}
       {assignFlow && <AssignModal data={data} flow={assignFlow} close={() => setAssignFlow(null)} onSave={saveAssignments} />}
@@ -476,44 +498,168 @@ function FormError({ message }: { message: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// One worker at a time: the selector, the swipe gesture and the calendar grid shared by Calendario and Historial
+
+const weekOptions = { weekStartsOn: 1 } as const;
+const countText = (value: number, one: string, many: string) => `${value} ${value === 1 ? one : many}`;
+
+// Short labels for small calendar cells (M, T, N…); a second letter is added only when two names would clash.
+const abbreviations = (names: string[]) => {
+  const unique = [...new Set(names)];
+  return new Map(unique.map((name) => {
+    const clash = unique.some((other) => other !== name && other[0]?.toUpperCase() === name[0]?.toUpperCase());
+    return [name, (clash ? name.slice(0, 2) : name.slice(0, 1)).toUpperCase()];
+  }));
+};
+
+/**
+ * A clearly horizontal finger movement switches worker. Vertical scrolling, slow drags and two-finger
+ * gestures are ignored, so reading the calendar never changes worker by accident.
+ */
+function useSwipe(onSwipe: (direction: 1 | -1) => void) {
+  const start = useRef<{ x: number; y: number; time: number } | null>(null);
+  return {
+    onTouchStart: (event: TouchEvent<HTMLElement>) => {
+      const touch = event.touches[0];
+      start.current = event.touches.length === 1 ? { x: touch.clientX, y: touch.clientY, time: Date.now() } : null;
+    },
+    onTouchEnd: (event: TouchEvent<HTMLElement>) => {
+      const begin = start.current;
+      start.current = null;
+      if (!begin) return;
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - begin.x;
+      const dy = touch.clientY - begin.y;
+      if (Math.abs(dx) >= 70 && Math.abs(dx) > Math.abs(dy) * 2 && Date.now() - begin.time < 800) onSwipe(dx < 0 ? 1 : -1);
+    },
+    onTouchCancel: () => { start.current = null; },
+  };
+}
+
+function WorkerSwitcher({ workers, worker, onSelect, onAddWorker }: { workers: Worker[]; worker: Worker; onSelect: (worker: Worker) => void; onAddWorker?: () => void }) {
+  const [listOpen, setListOpen] = useState(false);
+  const index = Math.max(0, workers.findIndex((entry) => entry.id === worker.id));
+  const go = (delta: number) => onSelect(workers[(index + delta + workers.length) % workers.length]);
+  const single = workers.length < 2;
+  return (
+    <div className="worker-switcher">
+      <button className="switch-arrow" onClick={() => go(-1)} disabled={single} aria-label="Trabajador anterior"><ChevronLeft aria-hidden="true" /></button>
+      <button className="worker-name" onClick={() => setListOpen(true)} aria-label={`Trabajador: ${worker.name}. Toca para elegir otro`}>
+        <i style={{ background: worker.color }} aria-hidden="true" />
+        <span>{workerLabel(worker)}</span>
+        <ChevronDown aria-hidden="true" />
+      </button>
+      <button className="switch-arrow" onClick={() => go(1)} disabled={single} aria-label="Trabajador siguiente"><ChevronRight aria-hidden="true" /></button>
+      {listOpen && (
+        <Modal close={() => setListOpen(false)} eyebrow="TRABAJADORES" title="Elegir trabajador">
+          <div className="worker-picker">
+            {workers.map((entry) => (
+              <button key={entry.id} className={entry.id === worker.id ? 'current' : ''} aria-current={entry.id === worker.id || undefined} onClick={() => { onSelect(entry); setListOpen(false); }}>
+                <i style={{ background: entry.color }} aria-hidden="true" />
+                <span>{workerLabel(entry)}</span>
+                {entry.id === worker.id ? <Check aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
+              </button>
+            ))}
+          </div>
+          {onAddWorker && <button className="secondary full" onClick={() => { setListOpen(false); onAddWorker(); }}><Plus aria-hidden="true" />Agregar trabajador</button>}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The calendar of one worker, read straight from the saved assignments (the single source of truth).
+ * Every shift of a day is shown: full names on wider screens, short letters plus a key on phones.
+ */
+function WorkerDays({ data, worker, days, month, isEnabled, onDay }: {
+  data: Data; worker: Worker; days: Date[]; month?: Date; isEnabled?: (date: string) => boolean; onDay: (date: string) => void;
+}) {
+  const first = iso(days[0]);
+  const last = iso(days[days.length - 1]);
+  const grouped = groupByDate(data, data.assignments.filter((item) => item.workerId === worker.id && item.date >= first && item.date <= last));
+  const byDate = new Map(grouped.map((day) => [day.date, day]));
+  const abbr = abbreviations(grouped.flatMap((day) => day.items.map((item) => item.shiftNameSnapshot)));
+  const today = iso(new Date());
+  return (
+    <>
+      <div className="week-labels" aria-hidden="true">{weekLabels.map((label) => <span key={label}>{label}</span>)}</div>
+      <div className="personal-days">
+        {days.map((date) => {
+          const key = iso(date);
+          if (month && !isSameMonth(date, month)) return <span key={key} className="pday blank" aria-hidden="true" />;
+          const day = byDate.get(key);
+          const what = day ? `${day.items.map((item) => item.shiftNameSnapshot).join(' y ')}, ${paymentService.money(day.total)}` : 'sin turnos';
+          return (
+            <button
+              key={key}
+              className={'pday' + (day ? ' worked' : '') + (key === today ? ' today' : '')}
+              disabled={isEnabled ? !isEnabled(key) : false}
+              onClick={() => onDay(key)}
+              aria-label={`${format(date, "EEEE d 'de' MMMM", { locale: es })}${key === today ? ', hoy' : ''}: ${what}`}
+            >
+              <span className="pday-number">{format(date, 'd')}</span>
+              {day?.items.map((item) => (
+                <span key={item.id} className="pshift" aria-hidden="true">
+                  <span className="full-name">{item.shiftNameSnapshot}</span>
+                  <span className="abbr">{abbr.get(item.shiftNameSnapshot)}</span>
+                </span>
+              ))}
+            </button>
+          );
+        })}
+      </div>
+      {abbr.size > 0 && <p className="shift-legend">{[...abbr].map(([name, short]) => `${short} = ${name}`).join(' · ')}</p>}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Calendar
 
-function Calendar({ data, cursor, weekly, setWeekly, setCursor, openDay, openAssign, openPicker, onAddWorker, banner, storageWarning }: {
-  data: Data; cursor: Date; weekly: boolean; setWeekly: (value: boolean) => void; setCursor: (date: Date) => void; openDay: (date: string) => void;
-  openAssign: (worker: Worker) => void; openPicker: () => void; onAddWorker: () => void; banner: ReactNode; storageWarning: boolean;
+function Calendar({ data, worker, workers, onWorker, cursor, weekly, setWeekly, setCursor, openDay, openMultiDay, openPicker, onAddWorker, banner, storageWarning }: {
+  data: Data; worker?: Worker; workers: Worker[]; onWorker: (worker: Worker) => void; cursor: Date; weekly: boolean; setWeekly: (value: boolean) => void;
+  setCursor: (date: Date) => void; openDay: (worker: Worker, date: string) => void; openMultiDay: (worker: Worker) => void; openPicker: () => void;
+  onAddWorker: () => void; banner: ReactNode; storageWarning: boolean;
 }) {
   const today = new Date();
-  const start = weekly ? startOfWeek(cursor, { weekStartsOn: 1 }) : startOfWeek(startOfMonth(cursor), { weekStartsOn: 1 });
-  const end = weekly ? endOfWeek(cursor, { weekStartsOn: 1 }) : endOfWeek(endOfMonth(cursor), { weekStartsOn: 1 });
+  const start = weekly ? startOfWeek(cursor, weekOptions) : startOfWeek(startOfMonth(cursor), weekOptions);
+  const end = weekly ? endOfWeek(cursor, weekOptions) : endOfWeek(endOfMonth(cursor), weekOptions);
   const days = eachDayOfInterval({ start, end });
-  const notCurrent = weekly ? iso(start) !== iso(startOfWeek(today, { weekStartsOn: 1 })) : !isSameMonth(cursor, today);
-  const workers = activeWorkers(data);
+  const notCurrent = weekly ? iso(start) !== iso(startOfWeek(today, weekOptions)) : !isSameMonth(cursor, today);
   const unit = weekly ? 'Semana' : 'Mes';
+  const swipe = useSwipe((direction) => {
+    if (!worker || workers.length < 2) return;
+    const index = workers.findIndex((entry) => entry.id === worker.id);
+    onWorker(workers[(index + direction + workers.length) % workers.length]);
+  });
 
   return (
     <section className="view">
       {banner}
       {storageWarning && <div className="banner warning" role="alert"><AlertTriangle aria-hidden="true" /><div><strong>El almacenamiento está casi lleno.</strong><p>Haz una copia de seguridad desde Ajustes.</p></div></div>}
-      <div className="segmented" role="group" aria-label="Tipo de vista">
-        <button className={!weekly ? 'selected' : ''} aria-pressed={!weekly} onClick={() => setWeekly(false)}>Mes</button>
-        <button className={weekly ? 'selected' : ''} aria-pressed={weekly} onClick={() => setWeekly(true)}>Semana</button>
-      </div>
-      <div className="month-nav">
-        <button onClick={() => setCursor(weekly ? addDays(cursor, -7) : subMonths(cursor, 1))} aria-label={`${unit} anterior`}><ChevronLeft aria-hidden="true" /></button>
-        <button className="month-title" onClick={openPicker} aria-label={`Elegir mes y año. Ahora: ${format(cursor, 'MMMM yyyy', { locale: es })}`}>
-          {format(cursor, 'MMMM yyyy', { locale: es })}<ChevronDown aria-hidden="true" />
-        </button>
-        <button onClick={() => setCursor(weekly ? addDays(cursor, 7) : addMonths(cursor, 1))} aria-label={`${unit} siguiente`}><ChevronRight aria-hidden="true" /></button>
-      </div>
-      {workers.length ? (
+      {worker ? (
         <>
-          <p className="hint">Toca un día para añadir turnos, o toca un trabajador para asignarle varios días.</p>
-          <div className="worker-chips">
-            {workers.map((entry) => (
-              <button key={entry.id} onClick={() => openAssign(entry)} aria-label={`Asignar turnos a ${entry.name}`}>
-                <i style={{ background: entry.color }} aria-hidden="true" />{entry.name}<Plus aria-hidden="true" />
-              </button>
-            ))}
+          <WorkerSwitcher workers={workers} worker={worker} onSelect={onWorker} onAddWorker={onAddWorker} />
+          <div className="month-nav">
+            <button onClick={() => setCursor(weekly ? addDays(cursor, -7) : subMonths(cursor, 1))} aria-label={`${unit} anterior`}><ChevronLeft aria-hidden="true" /></button>
+            <button className="month-title" onClick={openPicker} aria-label={`Elegir mes y año. Ahora: ${format(cursor, 'MMMM yyyy', { locale: es })}`}>
+              {format(cursor, 'MMMM yyyy', { locale: es })}<ChevronDown aria-hidden="true" />
+            </button>
+            <button onClick={() => setCursor(weekly ? addDays(cursor, 7) : addMonths(cursor, 1))} aria-label={`${unit} siguiente`}><ChevronRight aria-hidden="true" /></button>
+          </div>
+          <div className="calendar-card personal-calendar" {...swipe}>
+            <WorkerDays data={data} worker={worker} days={days} month={weekly ? undefined : cursor} onDay={(date) => openDay(worker, date)} />
+          </div>
+          {notCurrent && <button className="back-today" onClick={() => setCursor(today)}><Clock3 aria-hidden="true" />Volver a hoy</button>}
+          <div className="calendar-tools">
+            <div className="segmented" role="group" aria-label="Tipo de vista">
+              <button className={!weekly ? 'selected' : ''} aria-pressed={!weekly} onClick={() => setWeekly(false)}>Mes</button>
+              <button className={weekly ? 'selected' : ''} aria-pressed={weekly} onClick={() => setWeekly(true)}>Semana</button>
+            </div>
+            {!worker.archived && (
+              <button className="secondary" onClick={() => openMultiDay(worker)}><CalendarDays aria-hidden="true" />Asignar varios días</button>
+            )}
           </div>
         </>
       ) : (
@@ -522,37 +668,17 @@ function Calendar({ data, cursor, weekly, setWeekly, setCursor, openDay, openAss
           <button className="primary" onClick={onAddWorker}><Plus aria-hidden="true" />Agregar trabajador</button>
         </div>
       )}
-      <div className="calendar-card">
-        <div className="week-labels" aria-hidden="true">{weekLabels.map((label) => <span key={label}>{label}</span>)}</div>
-        <div className="days">{days.map((date) => {
-          const key = iso(date);
-          // One marker per worker, however many shifts they have that day; the detail lives in the day view.
-          const groups = groupByWorker(data, data.assignments.filter((item) => item.date === key));
-          const described = groups.map(({ worker, items }) => `${worker.name}: ${items.map((item) => item.shiftNameSnapshot).join(' y ')}`).join('. ');
-          return (
-            <button
-              key={key}
-              onClick={() => openDay(key)}
-              className={'day ' + (!isSameMonth(date, cursor) && !weekly ? 'muted ' : '') + (key === iso(today) ? 'today' : '')}
-              aria-label={`${format(date, "EEEE d 'de' MMMM", { locale: es })}${key === iso(today) ? ', hoy' : ''}. ${groups.length ? described : 'Sin turnos'}`}
-            >
-              <span>{format(date, 'd')}</span>
-              <i aria-hidden="true">
-                {groups.slice(0, 3).map(({ worker }) => <b key={worker.id} style={{ background: worker.color }} />)}
-                {groups.length > 3 && <em>+{groups.length - 3}</em>}
-              </i>
-            </button>
-          );
-        })}</div>
-      </div>
-      {notCurrent && <button className="back-today" onClick={() => setCursor(today)}><Clock3 aria-hidden="true" />Volver a hoy</button>}
     </section>
   );
 }
 
-function MiniCalendar({ selected, onToggle, initialMonth }: { selected: string[]; onToggle: (date: string) => void; initialMonth: Date }) {
+// Date picker for assigning several days at once; it also shows the shifts the worker already has.
+function MiniCalendar({ data, worker, selected, onToggle, initialMonth }: { data: Data; worker: Worker; selected: string[]; onToggle: (date: string) => void; initialMonth: Date }) {
   const [month, setMonth] = useState(startOfMonth(initialMonth));
-  const days = eachDayOfInterval({ start: startOfWeek(month, { weekStartsOn: 1 }), end: endOfWeek(endOfMonth(month), { weekStartsOn: 1 }) });
+  const days = eachDayOfInterval({ start: startOfWeek(month, weekOptions), end: endOfWeek(endOfMonth(month), weekOptions) });
+  const existing = groupByDate(data, data.assignments.filter((item) => item.workerId === worker.id && item.date >= iso(days[0]) && item.date <= iso(days[days.length - 1])));
+  const abbr = abbreviations(existing.flatMap((day) => day.items.map((item) => item.shiftNameSnapshot)));
+  const byDate = new Map(existing.map((day) => [day.date, day.items]));
   return (
     <div className="mini-calendar">
       <div className="mini-nav">
@@ -565,122 +691,132 @@ function MiniCalendar({ selected, onToggle, initialMonth }: { selected: string[]
         {days.map((date) => {
           const key = iso(date);
           const picked = selected.includes(key);
+          const has = byDate.get(key) ?? [];
           return (
             <button
               type="button"
               key={key}
               onClick={() => onToggle(key)}
               aria-pressed={picked}
-              aria-label={format(date, "EEEE d 'de' MMMM", { locale: es })}
-              className={(isSameMonth(date, month) ? '' : 'muted ') + (picked ? 'picked' : '')}
+              aria-label={`${format(date, "EEEE d 'de' MMMM", { locale: es })}${has.length ? `. Ya tiene: ${has.map((item) => item.shiftNameSnapshot).join(' y ')}` : ''}`}
+              className={(isSameMonth(date, month) ? '' : 'muted ') + (picked ? 'picked ' : '') + (has.length ? 'has' : '')}
             >
               {format(date, 'd')}
+              {has.length > 0 && <small aria-hidden="true">{has.map((item) => abbr.get(item.shiftNameSnapshot)).join('·')}</small>}
             </button>
           );
         })}
       </div>
+      {abbr.size > 0 && <p className="shift-legend always">{[...abbr].map(([name, short]) => `${short} = ${name}`).join(' · ')}</p>}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Day detail, worker selection, shift assignment and editing
+// One worker's day: what they already have (edit / delete) and the shifts that can still be added
 
-function DayModal({ date, data, close, onEdit, onDelete, onAdd }: {
-  date: string; data: Data; close: () => void; onEdit: (item: Assignment) => void; onDelete: (item: Assignment) => void; onAdd: () => void;
+// One shift line with its own Edit and (deliberately smaller) Delete actions.
+function ShiftRow({ data, item, worker, onEdit, onDelete }: {
+  data: Data; item: Assignment; worker: Worker; onEdit: (item: Assignment) => void; onDelete: (item: Assignment) => void;
 }) {
-  const groups = groupByWorker(data, data.assignments.filter((item) => item.date === date));
   return (
-    <Modal close={close} eyebrow="DETALLE DEL DÍA" title={longDate(date)}>
-      <div className="day-groups">
-        {groups.length ? groups.map(({ worker, items }) => {
-          const summary = paymentService.summarize(items);
-          return (
-            <section className="day-worker" key={worker.id} aria-label={worker.name}>
-              <header>
-                <i style={{ background: worker.color }} aria-hidden="true" />
-                <strong>{workerLabel(worker)}</strong>
-                <span>{formatHours(summary.hours)} · {paymentService.money(summary.total)}</span>
-              </header>
-              <ul>
-                {items.map((item) => (
-                  <li key={item.id} className="shift-row">
-                    <div className="shift-info">
-                      <span className="shift-icon" aria-hidden="true">{shiftIcon(data, item.shiftId)}</span>
-                      <strong>{item.shiftNameSnapshot}</strong>
-                      <span>{formatHours(item.hours)} · {paymentService.money(item.paymentSnapshot)}</span>
-                    </div>
-                    <div className="row-actions">
-                      <button className="secondary" onClick={() => onEdit(item)} aria-label={`Editar turno de ${item.shiftNameSnapshot} de ${worker.name}`}>
-                        <Pencil aria-hidden="true" />Editar
-                      </button>
-                      <button className="danger-outline" onClick={() => onDelete(item)} aria-label={`Eliminar turno de ${item.shiftNameSnapshot} de ${worker.name}`}>
-                        <Trash2 aria-hidden="true" />Eliminar turno
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          );
-        }) : <div className="empty"><Clock3 aria-hidden="true" /><p>No hay turnos este día.</p></div>}
+    <li className="shift-row">
+      <div className="shift-info">
+        <span className="shift-icon" aria-hidden="true">{shiftIcon(data, item.shiftId)}</span>
+        <strong>{item.shiftNameSnapshot}</strong>
+        <span>{formatHours(item.hours)} · {paymentService.money(item.paymentSnapshot)}</span>
       </div>
-      <button className="primary full" onClick={onAdd}><Plus aria-hidden="true" />Añadir trabajador</button>
-    </Modal>
+      <div className="row-actions">
+        <button className="secondary" onClick={() => onEdit(item)} aria-label={`Editar turno de ${item.shiftNameSnapshot} de ${worker.name}`}>
+          <Pencil aria-hidden="true" />Editar
+        </button>
+        <button className="danger-outline small" onClick={() => onDelete(item)} aria-label={`Eliminar turno de ${item.shiftNameSnapshot} de ${worker.name}`}>
+          <Trash2 aria-hidden="true" />Eliminar
+        </button>
+      </div>
+    </li>
   );
 }
 
-function WorkerPicker({ data, date, close, onPick, onAddWorker }: { data: Data; date?: string; close: () => void; onPick: (worker: Worker) => void; onAddWorker: () => void }) {
-  const workers = activeWorkers(data);
+function WorkerDayDialog({ data, worker, date, close, onSave, onEdit, onDelete }: {
+  data: Data; worker: Worker; date: string; close: () => void; onSave: (workerId: string, dates: string[], entries: NewShiftEntry[]) => string | undefined;
+  onEdit: (item: Assignment) => void; onDelete: (item: Assignment) => void;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [error, setError] = useState('');
+  const day = groupByDate(data, data.assignments.filter((item) => item.workerId === worker.id && item.date === date))[0];
+  const current = day?.items ?? [];
+  const available = worker.archived ? [] : activeShifts(data).filter((shift) => !current.some((item) => item.shiftId === shift.id));
+  const chosen = selected.filter((id) => available.some((shift) => shift.id === id));
+
+  const toggle = (id: string) => {
+    setError('');
+    setSelected((list) => (list.includes(id) ? list.filter((entry) => entry !== id) : [...list, id]));
+  };
+  const save = () => {
+    if (!chosen.length) return setError('Selecciona al menos un turno.');
+    // Normal shifts use the hours configured in Ajustes; an exceptional day is corrected afterwards with "Editar".
+    const result = onSave(worker.id, [date], available.filter((shift) => chosen.includes(shift.id)).map((shift) => ({ shiftId: shift.id, hours: shift.defaultHours })));
+    if (result) setError(result);
+  };
+
   return (
-    <Modal close={close} eyebrow={date ? longDate(date).toUpperCase() : 'AÑADIR TURNOS'} title="Selecciona un trabajador">
-      {workers.length ? (
-        <div className="worker-picker">
-          {workers.map((worker) => {
-            const current = date ? data.assignments.filter((item) => item.workerId === worker.id && item.date === date) : [];
-            return (
-              <button key={worker.id} onClick={() => onPick(worker)}>
-                <i style={{ background: worker.color }} aria-hidden="true" />
-                <span>
-                  {worker.name}
-                  {current.length > 0 && <small>Ya tiene: {current.map((item) => item.shiftNameSnapshot).join(', ')}</small>}
-                </span>
-                <ChevronRight aria-hidden="true" />
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="empty">
-          <Users aria-hidden="true" />
-          <p>Todavía no hay trabajadores.</p>
-          <button className="primary full" onClick={onAddWorker}><Plus aria-hidden="true" />Agregar trabajador</button>
-        </div>
+    <Modal close={close} className="worker-day-dialog" eyebrow={workerLabel(worker).toUpperCase()} title={longDate(date)}>
+      {current.length > 0 && (
+        <section className="day-worker worker-day" aria-label="Ya tiene">
+          <h3>Ya tiene</h3>
+          <ul>{current.map((item) => <ShiftRow key={item.id} data={data} item={item} worker={worker} onEdit={onEdit} onDelete={onDelete} />)}</ul>
+          <p className="day-total"><span>Total del día</span><strong>{paymentService.money(day.total)}</strong></p>
+        </section>
       )}
+      {available.length > 0 ? (
+        <>
+          <fieldset className="shift-options">
+            <legend>{current.length ? 'Añadir otro turno' : '¿Qué turno ha hecho?'}</legend>
+            {available.map((shift) => {
+              const checked = selected.includes(shift.id);
+              return (
+                <div key={shift.id} className={'shift-option' + (checked ? ' checked' : '')}>
+                  <label>
+                    <input type="checkbox" checked={checked} onChange={() => toggle(shift.id)} />
+                    <span className="shift-icon" aria-hidden="true">{shift.icon}</span>
+                    <span className="shift-text"><strong>{shift.name}</strong><small>{paymentService.money(shift.paymentAmount)}</small></span>
+                  </label>
+                </div>
+              );
+            })}
+          </fieldset>
+          <FormError message={error} />
+          <button className="primary full" onClick={save}>
+            <Check aria-hidden="true" />{chosen.length > 1 ? `Guardar ${chosen.length} turnos` : 'Guardar'}
+          </button>
+        </>
+      ) : !worker.archived && <p className="hint all-assigned">Ya tiene todos los turnos este día.</p>}
     </Modal>
   );
 }
 
 function AssignModal({ data, flow, close, onSave }: {
-  data: Data; flow: AssignFlow; close: () => void; onSave: (workerId: string, dates: string[], entries: NewShiftEntry[], keep: boolean) => string | undefined;
+  data: Data; flow: AssignFlow; close: () => void; onSave: (workerId: string, dates: string[], entries: NewShiftEntry[]) => string | undefined;
 }) {
   const shifts = activeShifts(data);
   const { worker } = flow;
   const [dates, setDates] = useState<string[]>(flow.dates);
   const [chooseDates, setChooseDates] = useState(!flow.dates.length);
   const [selected, setSelected] = useState<string[]>([]);
-  const [hours, setHours] = useState<Record<string, string>>(() => Object.fromEntries(shifts.map((shift) => [shift.id, numberText(shift.defaultHours)])));
-  const [keep, setKeep] = useState(false);
   const [error, setError] = useState('');
   const sortedDates = [...dates].sort();
-  // With a single day, shifts the worker already has that day are shown ticked and locked.
-  const existing = new Set(dates.length === 1 ? data.assignments.filter((item) => item.workerId === worker.id && item.date === dates[0]).map((item) => item.shiftId) : []);
+  // With a single day, the shifts the worker already has that day are listed and shown ticked; the others can be added.
+  const current = dates.length === 1
+    ? groupByDate(data, data.assignments.filter((item) => item.workerId === worker.id && item.date === dates[0]))[0]?.items ?? []
+    : [];
+  const existing = new Set(current.map((item) => item.shiftId));
   const chosen = selected.filter((id) => !existing.has(id));
-  const changedHours = chosen.some((id) => parseNumber(hours[id] ?? '') !== shifts.find((shift) => shift.id === id)?.defaultHours);
 
   const toggleShift = (id: string) => {
+    if (existing.has(id)) return setError(duplicateShiftMessage);
     setError('');
-    setSelected((current) => (current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]));
+    setSelected((list) => (list.includes(id) ? list.filter((entry) => entry !== id) : [...list, id]));
   };
   const toggleDate = (date: string) => {
     setError('');
@@ -688,10 +824,13 @@ function AssignModal({ data, flow, close, onSave }: {
   };
   const save = () => {
     if (!dates.length) return setError('Elige al menos un día.');
-    if (!chosen.length) return setError('Selecciona al menos un turno.');
-    const invalid = chosen.map((id) => hoursError(parseNumber(hours[id] ?? ''))).find(Boolean);
-    if (invalid) return setError(invalid);
-    const result = onSave(worker.id, sortedDates, chosen.map((id) => ({ shiftId: id, hours: parseNumber(hours[id]) })), keep && changedHours);
+    if (!chosen.length) return setError(existing.size ? 'Elige otro turno para añadir.' : 'Selecciona al menos un turno.');
+    // Normal shifts use the hours configured in Ajustes; an exceptional day is corrected afterwards with "Editar".
+    const entries = chosen.flatMap((id) => {
+      const shift = shifts.find((entry) => entry.id === id);
+      return shift ? [{ shiftId: id, hours: shift.defaultHours }] : [];
+    });
+    const result = onSave(worker.id, sortedDates, entries);
     if (result) setError(result);
   };
 
@@ -707,10 +846,16 @@ function AssignModal({ data, flow, close, onSave }: {
           {chooseDates ? 'Ocultar calendario' : 'Elegir más días'}
         </button>
       </div>
-      {chooseDates && <MiniCalendar selected={dates} onToggle={toggleDate} initialMonth={dates.length ? toDate(sortedDates[0]) : new Date()} />}
+      {chooseDates && <MiniCalendar data={data} worker={worker} selected={dates} onToggle={toggleDate} initialMonth={dates.length ? toDate(sortedDates[0]) : new Date()} />}
 
+      {current.length > 0 && (
+        <div className="current-shifts">
+          <strong>Ya tiene este día:</strong>
+          <span>{current.map((item) => `${shiftIcon(data, item.shiftId)} ${item.shiftNameSnapshot}`).join(' · ')}</span>
+        </div>
+      )}
       <fieldset className="shift-options">
-        <legend>¿Qué turno realizará?</legend>
+        <legend>{current.length ? '¿Qué turno quieres añadir?' : '¿Qué turno realizará?'}</legend>
         <p className="hint">Puedes marcar uno o varios turnos.</p>
         {shifts.map((shift) => {
           const already = existing.has(shift.id);
@@ -718,27 +863,17 @@ function AssignModal({ data, flow, close, onSave }: {
           return (
             <div key={shift.id} className={'shift-option' + (checked ? ' checked' : '') + (already ? ' already' : '')}>
               <label>
-                <input type="checkbox" checked={checked} disabled={already} onChange={() => toggleShift(shift.id)} />
+                <input type="checkbox" checked={checked} aria-disabled={already || undefined} onChange={() => toggleShift(shift.id)} />
                 <span className="shift-icon" aria-hidden="true">{shift.icon}</span>
                 <span className="shift-text">
                   <strong>{shift.name}</strong>
-                  <small>{already ? 'Ya asignado este día' : `${formatHours(shift.defaultHours)} · ${paymentService.money(shift.paymentAmount)}`}</small>
+                  <small>{already ? 'Ya asignado este día' : paymentService.money(shift.paymentAmount)}</small>
                 </span>
               </label>
-              {checked && !already && (
-                <HoursInput label={`Horas de ${shift.name}`} value={hours[shift.id] ?? ''} onChange={(value) => { setError(''); setHours({ ...hours, [shift.id]: value }); }} />
-              )}
             </div>
           );
         })}
       </fieldset>
-      {chosen.length > 0 && <p className="hint">El pago es fijo por turno: cambiar las horas no cambia el pago.</p>}
-      {chosen.length > 0 && changedHours && (
-        <label className="check">
-          <input type="checkbox" checked={keep} onChange={(event) => setKeep(event.target.checked)} />
-          <span>Guardar estas horas como predeterminadas</span>
-        </label>
-      )}
       <FormError message={error} />
       <button className="primary full" onClick={save}>
         <Check aria-hidden="true" />
@@ -787,7 +922,7 @@ function AssignmentEditor({ data, assignment, close, onSave, onDelete }: {
           {shifts.map((shift) => <option key={shift.id} value={shift.id}>{shift.name}</option>)}
         </select>
       </label>
-      <HoursInput label="Horas trabajadas" value={hours} onChange={(value) => { setError(''); setHours(value); }} />
+      <HoursInput label="Horas (solo si fueron distintas de lo habitual)" value={hours} onChange={(value) => { setError(''); setHours(value); }} />
       <p className="payment-note">
         Pago de este turno: <strong>{paymentService.money(payment)}</strong>
         <small>{newShift ? `Se usará el pago actual del turno «${newShift.name}».` : 'Se mantiene el pago con el que se registró.'}</small>
@@ -797,7 +932,9 @@ function AssignmentEditor({ data, assignment, close, onSave, onDelete }: {
         <button className="secondary big" onClick={close}>Cancelar</button>
         <button className="primary big" onClick={save}><Check aria-hidden="true" />Guardar</button>
       </div>
-      <button className="danger-outline full" onClick={() => onDelete(assignment)}><Trash2 aria-hidden="true" />Eliminar turno</button>
+      <div className="secondary-actions">
+        <button className="danger-outline small" onClick={() => onDelete(assignment)}><Trash2 aria-hidden="true" />Eliminar turno</button>
+      </div>
     </Modal>
   );
 }
@@ -855,7 +992,7 @@ function ShiftModal({ shift, shifts, close, onSave, onDelete }: {
   return (
     <Modal close={close} eyebrow="CONFIGURACIÓN DE TURNOS" title={shift ? `Editar «${shift.name}»` : 'Añadir turno'}>
       <label>Nombre del turno<input autoFocus={!shift} value={name} onChange={(event) => { setError(''); setName(event.target.value); }} placeholder="Por ejemplo: Festivo" /></label>
-      <label>Horas habituales<input inputMode="decimal" value={hours} onChange={(event) => { setError(''); setHours(event.target.value); }} placeholder="6" /></label>
+      <label>Horas<input inputMode="decimal" value={hours} onChange={(event) => { setError(''); setHours(event.target.value); }} placeholder="6" /></label>
       <label>Pago (€)<input inputMode="decimal" value={payment} onChange={(event) => { setError(''); setPayment(event.target.value); }} placeholder="30" /></label>
       <fieldset className="icon-picker">
         <legend>Símbolo</legend>
@@ -869,7 +1006,7 @@ function ShiftModal({ shift, shifts, close, onSave, onDelete }: {
         <button className="secondary big" onClick={close}>Cancelar</button>
         <button className="primary big" onClick={save}><Check aria-hidden="true" />Guardar</button>
       </div>
-      {onDelete && <button className="danger-outline full" onClick={onDelete}><Trash2 aria-hidden="true" />Eliminar turno</button>}
+      {onDelete && <div className="secondary-actions"><button className="danger-outline small" onClick={onDelete}><Trash2 aria-hidden="true" />Eliminar turno</button></div>}
     </Modal>
   );
 }
@@ -894,8 +1031,8 @@ function MonthPicker({ date, close, onPick }: { date: Date; close: () => void; o
 function Workers({ data, onEdit, onDelete, onAdd }: { data: Data; onEdit: (worker: Worker) => void; onDelete: (worker: Worker) => void; onAdd: () => void }) {
   const workers = activeWorkers(data);
   return (
-    <section className="view">
-      <div className="intro"><p>Tu equipo. El turno se elige cada día al asignar.</p><button className="primary" onClick={onAdd}><Plus aria-hidden="true" />Agregar trabajador</button></div>
+    <>
+      <h3 className="first">Trabajadores</h3>
       {!workers.length && <div className="empty-card"><p>Todavía no hay trabajadores.</p></div>}
       <div className="workers-list">
         {workers.map((worker) => {
@@ -912,109 +1049,199 @@ function Workers({ data, onEdit, onDelete, onAdd }: { data: Data; onEdit: (worke
           );
         })}
       </div>
-    </section>
+      <button className="primary full add-shift" onClick={onAdd}><Plus aria-hidden="true" />Agregar trabajador</button>
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// History
+// History: one worker at a time — what they worked, totals and what to pay them
 
-function HistoryView({ data }: { data: Data }) {
-  const [range, setRange] = useState<'week' | 'month' | 'year' | 'custom'>('month');
+type HistoryRange = 'week' | 'month' | 'year' | 'custom';
+
+const shortRange = (start: string, end: string) =>
+  start === end ? format(toDate(start), 'dd/MM') : `${format(toDate(start), 'dd/MM')} – ${format(toDate(end), 'dd/MM')}`;
+
+const periodOf = (range: Exclude<HistoryRange, 'custom'>, anchor: Date): [string, string] =>
+  range === 'week'
+    ? [iso(startOfWeek(anchor, weekOptions)), iso(endOfWeek(anchor, weekOptions))]
+    : range === 'month'
+      ? [iso(startOfMonth(anchor)), iso(endOfMonth(anchor))]
+      : [iso(startOfYear(anchor)), iso(endOfYear(anchor))];
+
+function HistoryView({ data, worker, workers, onWorker, openDay }: {
+  data: Data; worker?: Worker; workers: Worker[]; onWorker: (worker: Worker) => void; openDay: (worker: Worker, date: string) => void;
+}) {
+  const [range, setRange] = useState<HistoryRange>('week');
+  const [anchor, setAnchor] = useState(new Date());
   const [from, setFrom] = useState(iso(startOfMonth(new Date())));
   const [to, setTo] = useState(iso(new Date()));
-  const [active, setActive] = useState<Worker | null>(null);
   const now = new Date();
-  const [startDate, endDate] = range === 'week'
-    ? [iso(startOfWeek(now, { weekStartsOn: 1 })), iso(endOfWeek(now, { weekStartsOn: 1 }))]
-    : range === 'month'
-      ? [iso(startOfMonth(now)), iso(endOfMonth(now))]
-      : range === 'year'
-        ? [`${now.getFullYear()}-01-01`, `${now.getFullYear()}-12-31`]
-        : from <= to ? [from, to] : [to, from];
-  const inRange = data.assignments.filter((item) => item.date >= startDate && item.date <= endDate);
-  const workers = data.workers.filter((worker) => !worker.archived || inRange.some((item) => item.workerId === worker.id));
+  const [startDate, endDate] = range === 'custom' ? (from <= to ? [from, to] : [to, from]) : periodOf(range, anchor);
+  const swipe = useSwipe((direction) => {
+    if (!worker || workers.length < 2) return;
+    const index = workers.findIndex((entry) => entry.id === worker.id);
+    onWorker(workers[(index + direction + workers.length) % workers.length]);
+  });
+
+  if (!worker) return <section className="view"><div className="empty-card"><p>Todavía no hay trabajadores.</p></div></section>;
+
+  const step = (delta: number) => setAnchor(range === 'week' ? addWeeks(anchor, delta) : range === 'month' ? addMonths(anchor, delta) : addYears(anchor, delta));
+  const isCurrent = range === 'custom' || periodOf(range, now)[0] === startDate;
+  const unit = range === 'week' ? 'Semana' : range === 'month' ? 'Mes' : 'Año';
+  const title = range === 'week' ? (isCurrent ? 'Esta semana' : `Semana ${getISOWeek(anchor)}`) : range === 'month' ? format(anchor, 'MMMM yyyy', { locale: es }) : format(anchor, 'yyyy');
+
+  const items = data.assignments.filter((item) => item.workerId === worker.id && item.date >= startDate && item.date <= endDate);
+  const byDate = new Map(groupByDate(data, items).map((day) => [day.date, day]));
+  const summary = paymentService.summarize(items);
+  const allWeeks = weeklyTotals(items, startDate, endDate);
+  const weeks = allWeeks.length > 6 ? allWeeks.filter((week) => week.shifts) : allWeeks;
+  const months: Date[] = [];
+  for (let month = startOfMonth(toDate(startDate)); iso(month) <= endDate; month = addMonths(month, 1)) months.push(month);
 
   return (
     <section className="view">
+      <WorkerSwitcher workers={workers} worker={worker} onSelect={onWorker} />
       <div className="segmented history-segment" role="group" aria-label="Periodo">
-        {([['week', 'Semana'], ['month', 'Mes'], ['year', 'Año'], ['custom', 'Rango']] as const).map(([id, label]) => (
+        {([['week', 'Semana'], ['month', 'Mes'], ['year', 'Año'], ['custom', 'Personalizado']] as const).map(([id, label]) => (
           <button key={id} className={range === id ? 'selected' : ''} aria-pressed={range === id} onClick={() => setRange(id)}>{label}</button>
         ))}
       </div>
-      {range === 'custom' && (
-        <div className="range-inputs">
-          <label>Desde<input type="date" min="2026-01-01" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
-          <label>Hasta<input type="date" min="2026-01-01" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+      {range === 'custom' ? (
+        <>
+          <div className="range-inputs">
+            <label>Desde<input type="date" min="2026-01-01" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
+            <label>Hasta<input type="date" min="2026-01-01" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+          </div>
+          <p className="period">Periodo: {formatRangeText(startDate, endDate)}</p>
+        </>
+      ) : (
+        <div className="month-nav period-nav">
+          <button onClick={() => step(-1)} aria-label={`${unit} anterior`}><ChevronLeft aria-hidden="true" /></button>
+          <div className="period-title" aria-live="polite">
+            <strong>{title}</strong>
+            {range === 'week' && <small>{formatRangeText(startDate, endDate)}</small>}
+          </div>
+          <button onClick={() => step(1)} aria-label={`${unit} siguiente`}><ChevronRight aria-hidden="true" /></button>
         </div>
       )}
-      <p className="period">Periodo: {formatRangeText(startDate, endDate)}</p>
-      {!workers.length && <div className="empty-card"><p>Todavía no hay trabajadores.</p></div>}
-      <div className="history-list">
-        {workers.map((worker) => {
-          const summary = paymentService.summarize(inRange.filter((item) => item.workerId === worker.id));
-          return (
-            <button key={worker.id} onClick={() => setActive(worker)}>
-              <i style={{ background: worker.color }} aria-hidden="true" />
-              <div>
-                <strong>{workerLabel(worker)}</strong>
-                <span>{summary.days} {summary.days === 1 ? 'día' : 'días'} · {formatHours(summary.hours)} · Total {paymentService.money(summary.total)}</span>
-              </div>
-              <ChevronRight aria-hidden="true" />
-            </button>
-          );
-        })}
+      {!isCurrent && (
+        <button className="secondary today-link" onClick={() => setAnchor(new Date())}>
+          <Clock3 aria-hidden="true" />{range === 'week' ? 'Volver a esta semana' : range === 'month' ? 'Volver a este mes' : 'Volver a este año'}
+        </button>
+      )}
+
+      {range === 'week' && <PayCard worker={worker} items={items} />}
+
+      <div className="calendar-card personal-calendar" {...swipe}>
+        {range === 'week' && (
+          <ul className="week-list">
+            {eachDayOfInterval({ start: toDate(startDate), end: toDate(endDate) }).map((date) => {
+              const key = iso(date);
+              const day = byDate.get(key);
+              const what = day ? `${day.items.map((item) => item.shiftNameSnapshot).join(' y ')}, ${paymentService.money(day.total)}` : 'sin turnos';
+              return (
+                <li key={key}>
+                  <button className={day ? 'worked' : ''} onClick={() => openDay(worker, key)} aria-label={`${format(date, "EEEE d 'de' MMMM", { locale: es })}: ${what}`}>
+                    <span className="week-day">{format(date, 'EEE d', { locale: es })}</span>
+                    <span className="week-shifts">{day ? day.items.map((item) => item.shiftNameSnapshot).join(' + ') : 'Sin turnos'}</span>
+                    {day && <b>{paymentService.money(day.total)}</b>}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {range === 'year' && (
+          <div className="year-grid">
+            {months.map((month) => {
+              const monthItems = items.filter((item) => item.date.startsWith(format(month, 'yyyy-MM')));
+              return (
+                <button key={iso(month)} className={monthItems.length ? 'worked' : ''} onClick={() => { setRange('month'); setAnchor(month); }}>
+                  <strong>{format(month, 'MMMM', { locale: es })}</strong>
+                  <span>{countText(monthItems.length, 'turno', 'turnos')}</span>
+                  <b>{paymentService.money(paymentService.total(monthItems))}</b>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {(range === 'month' || range === 'custom') && months.map((month) => (
+          <div className="personal-month" key={iso(month)}>
+            {range === 'custom' && <h4>{format(month, 'MMMM yyyy', { locale: es })}</h4>}
+            <WorkerDays
+              data={data}
+              worker={worker}
+              days={eachDayOfInterval({ start: startOfWeek(month, weekOptions), end: endOfWeek(endOfMonth(month), weekOptions) })}
+              month={month}
+              isEnabled={(date) => date >= startDate && date <= endDate}
+              onDay={(date) => openDay(worker, date)}
+            />
+          </div>
+        ))}
       </div>
-      {active && (
-        <HistoryModal
-          data={data}
-          worker={active}
-          assignments={inRange.filter((item) => item.workerId === active.id)}
-          period={formatRangeText(startDate, endDate)}
-          close={() => setActive(null)}
-        />
+      {range === 'year' && <p className="hint">Toca un mes para ver su calendario.</p>}
+
+      <h3>Resumen</h3>
+      <div className="metrics">
+        <span>Días trabajados<strong>{summary.days}</strong></span>
+        <span>Turnos<strong>{summary.shifts}</strong></span>
+        <span>Horas<strong>{formatHours(summary.hours)}</strong></span>
+        <span className="metric-total">Total<strong>{paymentService.money(summary.total)}</strong></span>
+      </div>
+
+      {range !== 'week' && (
+        <>
+          <h3>Pago semanal</h3>
+          {allWeeks.length > 6 && <p className="hint">Solo se muestran las semanas con turnos.</p>}
+          {weeks.length ? (
+            <ul className="week-pay">
+              {weeks.map((week) => (
+                <li key={week.start}>
+                  <span>
+                    <strong>{range === 'month' ? `Semana ${allWeeks.indexOf(week) + 1}` : `Semana ${getISOWeek(toDate(week.start))}`}</strong>
+                    <small>{shortRange(week.start, week.end)} · {countText(week.shifts, 'turno', 'turnos')}</small>
+                  </span>
+                  <b>{paymentService.money(week.total)}</b>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="empty">Sin turnos en este periodo.</p>}
+        </>
       )}
     </section>
   );
 }
 
-function HistoryModal({ data, worker, assignments, period, close }: { data: Data; worker: Worker; assignments: Assignment[]; period: string; close: () => void }) {
-  const summary = paymentService.summarize(assignments);
-  const days = groupByDate(data, assignments);
-
+// "¿Cuánto le tengo que pagar esta semana?": the total first and large, then what it is made of.
+function PayCard({ worker, items }: { worker: Worker; items: Assignment[] }) {
+  const lines = paymentBreakdown(items);
+  const total = paymentService.total(items);
+  const repeatedName = (name: string) => lines.filter((line) => line.name === name).length > 1;
   return (
-    <Modal close={close} className="history-modal" eyebrow="HISTORIAL DEL TRABAJADOR" title={<span className="person-title"><i style={{ background: worker.color }} aria-hidden="true" />{workerLabel(worker)}</span>}>
-      <p className="period">Periodo: {period}</p>
-      <div className="metrics">
-        <span>Días<strong>{summary.days}</strong></span>
-        <span>Horas<strong>{formatHours(summary.hours)}</strong></span>
-        <span>Total<strong>{paymentService.money(summary.total)}</strong></span>
-        <span>Promedio<strong>{formatHours(Math.round(summary.averageHours * 10) / 10)}/día</strong></span>
-      </div>
-      <h3>Registro por días</h3>
-      <div className="chronology">
-        {days.length ? days.map((day) => (
-          <section key={day.date} aria-label={formatDateText(day.date)}>
-            <h4>{format(toDate(day.date), 'EEEE dd/MM/yyyy', { locale: es })}</h4>
-            {day.items.map((item) => (
-              <div key={item.id} className="chrono-row">
-                <span><span aria-hidden="true">{shiftIcon(data, item.shiftId)} </span>{item.shiftNameSnapshot} · {formatHours(item.hours)}</span>
-                <b>{paymentService.money(item.paymentSnapshot)}</b>
-              </div>
-            ))}
-            <div className="chrono-total"><span>Total del día · {formatHours(day.hours)}</span><b>{paymentService.money(day.total)}</b></div>
-          </section>
-        )) : <p className="empty">Sin turnos en este periodo.</p>}
-      </div>
-    </Modal>
+    <section className="pay-total" aria-label={`Total a pagar a ${worker.name}`}>
+      <p className="pay-label">Total a pagar</p>
+      <p className="pay-amount">{paymentService.money(total)}</p>
+      {lines.length > 0 ? (
+        <ul>
+          {lines.map((line) => (
+            <li key={`${line.name}|${line.unit}`}>
+              <span>{line.name} × {line.count}{repeatedName(line.name) ? ` (${paymentService.money(line.unit)})` : ''}</span>
+              <strong>{paymentService.money(line.total)}</strong>
+            </li>
+          ))}
+          <li className="pay-sum"><span>Total</span><strong>{paymentService.money(total)}</strong></li>
+        </ul>
+      ) : <p className="pay-empty">Sin turnos en esta semana.</p>}
+    </section>
   );
 }
 
 // ---------------------------------------------------------------------------
 // Settings, export and preview
 
-function SettingsView({ data, onEditShift, onAddShift, onOpenExport, onImport, onInvalidFile, textSize, onTextSize }: {
-  data: Data; onEditShift: (shift: Shift) => void; onAddShift: () => void; onOpenExport: (kind: ExportFormat) => void; onImport: (value: unknown) => void;
+function SettingsView({ data, workers, onEditShift, onAddShift, onOpenExport, onImport, onInvalidFile, textSize, onTextSize }: {
+  data: Data; workers: ReactNode; onEditShift: (shift: Shift) => void; onAddShift: () => void; onOpenExport: (kind: ExportFormat) => void; onImport: (value: unknown) => void;
   onInvalidFile: () => void; textSize: TextSize; onTextSize: (id: TextSize) => void;
 }) {
   const importRef = useRef<HTMLInputElement>(null);
@@ -1039,6 +1266,8 @@ function SettingsView({ data, onEditShift, onAddShift, onOpenExport, onImport, o
 
   return (
     <section className="view settings">
+      {workers}
+
       <h3>Tamaño del texto</h3>
       <div className="segmented text-size" role="group" aria-label="Tamaño del texto">
         {textSizes.map((size) => (
@@ -1058,8 +1287,7 @@ function SettingsView({ data, onEditShift, onAddShift, onOpenExport, onImport, o
             <span className="shift-icon" aria-hidden="true">{shift.icon}</span>
             <div>
               <strong>{shift.name}</strong>
-              <span>{shift.defaultHours.toLocaleString('es-ES')} horas</span>
-              <span>{paymentService.money(shift.paymentAmount)}</span>
+              <span>{formatHours(shift.defaultHours)} · {paymentService.money(shift.paymentAmount)}</span>
             </div>
             <button className="secondary" onClick={() => onEditShift(shift)} aria-label={`Editar turno ${shift.name}`}><Pencil aria-hidden="true" />Editar</button>
           </article>
